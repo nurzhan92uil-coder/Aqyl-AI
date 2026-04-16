@@ -1,62 +1,62 @@
 import telebot
-import requests
-import json
-import urllib3
+import openai
+import time
+from requests.exceptions import ReadTimeout, ConnectionError
 
-# SSL қатесі туралы ескертулерді көрсетпеу үшін
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ПАРАМЕТРЛЕР
+TOKEN = 'СІЗДІҢ_ТЕЛЕГРАМ_БОТ_ТОКЕНІҢІЗ'
+DEEPSEEK_API_KEY = 'СІЗДІҢ_DEEPSEEK_API_КІЛТІҢІЗ'
 
-# --- КІЛТТЕР ---
-TELEGRAM_TOKEN = "8785253485:AAHpsup5Zr8uEEli1iseyn43k_V69VIzhLQ"
-DEEPSEEK_KEY = "sk-0ce2b33d2495486fae0994f06277ff96"
+bot = telebot.TeleBot(TOKEN)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+# DeepSeek клиентін баптау
+client = openai.OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
+)
 
-def get_deepseek_response(text):
-    url = "https://api.deepseek.com/chat/completions"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {DEEPSEEK_KEY}"
-    }
-    
-    system_instruction = (
-        "Сен - Ағыбаев Нұржан құрастырған ақылды жасанды интеллект көмекшісісің. "
-        "Сенің есімің - 'Aqyl-AI'. Егер біреу 'Сені кім жасады?' деп сұраса, "
-        "міндетті түрде: 'Мені Ағыбаев Нұржан құрастырып шығарды' деп жауап бер."
-    )
-    
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": text}
-        ]
-    }
-    
-    try:
-        # verify=False параметрін қостық - бұл SSL сертификатын тексеруді айналып өтеді
-        response = requests.post(url, headers=headers, data=json.dumps(data), timeout=30, verify=False)
+def get_ai_response(user_text):
+    max_retries = 3  # Қайталау саны
+    retry_delay = 2  # Күту уақыты (секунд)
+
+    for i in range(max_retries):
+        try:
+            print(f"DeepSeek-ке сұраныс жіберілуде (Талпыныс {i+1})...")
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "Сен Aqyl-AI атты мектеп оқушыларына көмектесетін ақылды роботсың. Қазақ тілінде жауап бер."},
+                    {"role": "user", "content": user_text},
+                ],
+                stream=False,
+                timeout=60  # Күту уақытын 60 секундқа дейін ұзарттық
+            )
+            return response.choices[0].message.content
         
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content']
-        else:
-            return f"DeepSeek қатесі: {response.status_code}"
-            
-    except Exception as e:
-        return f"Байланыс қатесі: {e}"
+        except (ReadTimeout, ConnectionError):
+            if i < max_retries - 1:
+                print(f"Байланыс үзілді, {retry_delay} секундтан кейін қайта көреді...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                return "Кешіріңіз, DeepSeek сервері қазір өте бос емес. Сәлден соң қайталап көріңізші."
+        except Exception as e:
+            return f"Қате орын алды: {str(e)}"
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(message, "Сәлем! Мен Aqyl-AI ботымын. Маған кез келген сұрағыңды қойсаң болады.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    print(f"Сұрақ: {message.text}")
+    print(f"Пайдаланушы: {message.from_user.first_name}, Сұрақ: {message.text}")
+    
+    # Бот "ойланып жатқан" секілді көрінуі үшін
     bot.send_chat_action(message.chat.id, 'typing')
-    answer = get_deepseek_response(message.text)
+    
+    answer = get_ai_response(message.text)
     bot.reply_to(message, answer)
-    print("Жауап жіберілді!")
 
-print("-----------------------------------------")
-print("AQYL-AI БОТЫ SSL ҚАТЕСІ ТҮЗЕТІЛІП ҚОСЫЛДЫ!")
-print("-----------------------------------------")
-
-bot.infinity_polling()
+if __name__ == "__main__":
+    print("Бот іске қосылды...")
+    bot.polling(none_stop=True)
