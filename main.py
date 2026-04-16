@@ -1,11 +1,13 @@
 import telebot
 import openai
 import time
+from datetime import datetime
 from requests.exceptions import ReadTimeout, ConnectionError
 
-# ПАРАМЕТРЛЕР
-TOKEN = 'СІЗДІҢ_ТЕЛЕГРАМ_БОТ_ТОКЕНІҢІЗ'
-DEEPSEEK_API_KEY = 'СІЗДІҢ_DEEPSEEK_API_КІЛТІҢІЗ'
+# --- СІЗДІҢ МӘЛІМЕТТЕРІҢІЗ ҚОСЫЛДЫ ---
+TOKEN = '8785253485:AAHpsup5Zr8uEEli1iseyn43k_V69VIzhLQ'
+DEEPSEEK_API_KEY = 'sk-0ce2b33d2495486fae0994f06277ff96'
+# ------------------------------------
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -15,48 +17,62 @@ client = openai.OpenAI(
     base_url="https://api.deepseek.com"
 )
 
-def get_ai_response(user_text):
-    max_retries = 3  # Қайталау саны
-    retry_delay = 2  # Күту уақыты (секунд)
+# Пайдаланушылардың хат-хабарлар тарихын сақтауға арналған сөздік
+user_history = {}
 
+def get_ai_response(user_id, user_text):
+    # Ағымдағы уақытты алу (Бот уақытты білуі үшін)
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Тарихты бастау және жүйелік нұсқаулық
+    if user_id not in user_history:
+        user_history[user_id] = [
+            {"role": "system", "content": f"Сен Aqyl-AI роботысың. Қазіргі нақты уақыт: {current_time}. Сен ақылдысың және бәрін есте сақтайсың. Тек қазақ тілінде жауап бер."}
+        ]
+    
+    # Пайдаланушы сөзін тарихқа қосу
+    user_history[user_id].append({"role": "user", "content": user_text})
+    
+    # Контекстті (жадыны) соңғы 10 хабарламамен шектеу
+    if len(user_history[user_id]) > 11:
+        user_history[user_id] = [user_history[user_id][0]] + user_history[user_id][-10:]
+
+    max_retries = 3
     for i in range(max_retries):
         try:
-            print(f"DeepSeek-ке сұраныс жіберілуде (Талпыныс {i+1})...")
+            print(f"DeepSeek-ке сұраныс жіберілуде... Талпыныс {i+1}")
             response = client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": "Сен Aqyl-AI атты мектеп оқушыларына көмектесетін ақылды роботсың. Қазақ тілінде жауап бер."},
-                    {"role": "user", "content": user_text},
-                ],
+                messages=user_history[user_id],
                 stream=False,
-                timeout=60  # Күту уақытын 60 секундқа дейін ұзарттық
+                timeout=60
             )
-            return response.choices[0].message.content
+            answer = response.choices[0].message.content
+            # Жауапты тарихқа сақтау
+            user_history[user_id].append({"role": "assistant", "content": answer})
+            return answer
         
         except (ReadTimeout, ConnectionError):
             if i < max_retries - 1:
-                print(f"Байланыс үзілді, {retry_delay} секундтан кейін қайта көреді...")
-                time.sleep(retry_delay)
+                time.sleep(2)
                 continue
             else:
-                return "Кешіріңіз, DeepSeek сервері қазір өте бос емес. Сәлден соң қайталап көріңізші."
+                return "Кешіріңіз, байланыс үзілді. Сәлден соң қайталаңыз."
         except Exception as e:
-            return f"Қате орын алды: {str(e)}"
+            return f"Қате: {str(e)}"
 
-@bot.message_handler(commands=['start', 'help'])
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Сәлем! Мен Aqyl-AI ботымын. Маған кез келген сұрағыңды қойсаң болады.")
+    user_id = message.chat.id
+    user_history[user_id] = [] # Жаңадан бастағанда тарихты тазалау
+    bot.reply_to(message, "Сәлем! Мен Aqyl-AI. Енді мен уақытты да, сіздің сөздеріңізді де ұмытпаймын. Не туралы сөйлесеміз?")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    print(f"Пайдаланушы: {message.from_user.first_name}, Сұрақ: {message.text}")
-    
-    # Бот "ойланып жатқан" секілді көрінуі үшін
     bot.send_chat_action(message.chat.id, 'typing')
-    
-    answer = get_ai_response(message.text)
+    answer = get_ai_response(message.chat.id, message.text)
     bot.reply_to(message, answer)
 
 if __name__ == "__main__":
-    print("Бот іске қосылды...")
-    bot.polling(none_stop=True)
+    print("Бот 'Есте сақтау' режимінде іске қосылды...")
+    bot.polling(none_stop=True, timeout=90)
