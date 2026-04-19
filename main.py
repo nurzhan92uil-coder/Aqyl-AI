@@ -1,78 +1,97 @@
-import telebot
-import openai
-import time
-from datetime import datetime
-from requests.exceptions import ReadTimeout, ConnectionError
+import logging
+import datetime
+import fitz  # PyMuPDF
+import os
+from groq import Groq
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# --- СІЗДІҢ МӘЛІМЕТТЕРІҢІЗ ҚОСЫЛДЫ ---
-TOKEN = '8785253485:AAHpsup5Zr8uEEli1iseyn43k_V69VIzhLQ'
-DEEPSEEK_API_KEY = 'sk-0ce2b33d2495486fae0994f06277ff96'
-# ------------------------------------
+# --- БАПТАУЛАР ---
+TELEGRAM_TOKEN = "8785253485:AAHpsup5Zr8uEEli1iseyn43k_V69VIzhLQ"
+GROQ_API_KEY = "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"
 
-bot = telebot.TeleBot(TOKEN)
+# Оқулықтар тізімі
+BOOKS = ["6 кл.pdf", "8кл.pdf", "9 кл.pdf", "10 кл.pdf", "11 кл.pdf"]
 
-# DeepSeek клиентін баптау
-client = openai.OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com"
-)
-
-# Пайдаланушылардың хат-хабарлар тарихын сақтауға арналған сөздік
+client = Groq(api_key=GROQ_API_KEY)
 user_history = {}
 
-def get_ai_response(user_id, user_text):
-    # Ағымдағы уақытты алу (Бот уақытты білуі үшін)
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- ІЗДЕУ ФУНКЦИЯСЫ ---
+def search_in_all_books(query):
+    combined_context = ""
+    found_any = False
+    keywords = [word.lower() for word in query.split() if len(word) > 3]
     
-    # Тарихты бастау және жүйелік нұсқаулық
+    for book_path in BOOKS:
+        if os.path.exists(book_path):
+            try:
+                doc = fitz.open(book_path)
+                found_in_this_book = 0
+                for page_num, page in enumerate(doc):
+                    text = page.get_text()
+                    if any(kw in text.lower() for kw in keywords):
+                        combined_context += f"\n[{book_path}, {page_num+1}-бет]:\n{text}\n"
+                        found_any = True
+                        found_in_this_book += 1
+                    if found_in_this_book >= 2: break
+                doc.close()
+            except: pass
+        if len(combined_context) > 5000: break
+    return combined_context, found_any
+
+def get_ai_response(user_id, user_text):
+    now = datetime.datetime.now()
+    current_date = now.strftime("%d.%m.%Y")
+    days_kz = ["Дүйсенбі", "Сейсенбі", "Сәрсенбі", "Бейсенбі", "Жұма", "Сенбі", "Жексенбі"]
+    weekday = days_kz[now.weekday()]
+
+    book_info, info_found = search_in_all_books(user_text)
+
     if user_id not in user_history:
         user_history[user_id] = [
-            {"role": "system", "content": f"Сен Aqyl-AI роботысың. Қазіргі нақты уақыт: {current_time}. Сен ақылдысың және бәрін есте сақтайсың. Тек қазақ тілінде жауап бер."}
+            {
+                "role": "system", 
+                "content": (
+                    f"Бүгін: {current_date}, {weekday}. Сен — Ағыбаев Нұржан жасап шығарған көмекшісің. "
+                    "Сенің стилің: қарапайым, сыпайы және нақты. "
+                    "1. Өзіңді мақтама, 'білімдімін' деп айтпа. Тек сұраққа жауап бер. "
+                    "2. Кез келген тақырыпта (ауа райы, жалпы сұрақтар) жауап беруге тырыс. 'Білмеймін' деп жауаптан қашпа. "
+                    "3. Егер оқулықтан мәлімет табылса, оны пайдалан. Бірақ 'тек информатиканы білемін' деп пайдаланушыны шектеме. "
+                    "4. Автор туралы сұраса: 'Мені Ағыбаев Нұржан есімді ұстаз құрастырған' деп қысқа қайыр."
+                )
+            }
         ]
-    
-    # Пайдаланушы сөзін тарихқа қосу
-    user_history[user_id].append({"role": "user", "content": user_text})
-    
-    # Контекстті (жадыны) соңғы 10 хабарламамен шектеу
-    if len(user_history[user_id]) > 11:
-        user_history[user_id] = [user_history[user_id][0]] + user_history[user_id][-10:]
 
-    max_retries = 3
-    for i in range(max_retries):
-        try:
-            print(f"DeepSeek-ке сұраныс жіберілуде... Талпыныс {i+1}")
-            response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=user_history[user_id],
-                stream=False,
-                timeout=60
-            )
-            answer = response.choices[0].message.content
-            # Жауапты тарихқа сақтау
-            user_history[user_id].append({"role": "assistant", "content": answer})
-            return answer
-        
-        except (ReadTimeout, ConnectionError):
-            if i < max_retries - 1:
-                time.sleep(2)
-                continue
-            else:
-                return "Кешіріңіз, байланыс үзілді. Сәлден соң қайталаңыз."
-        except Exception as e:
-            return f"Қате: {str(e)}"
+    if info_found:
+        prompt = f"Оқулық мәліметі бойынша жауап бер:\n{book_info}\n\nСұрақ: {user_text}"
+    else:
+        prompt = user_text
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    user_id = message.chat.id
-    user_history[user_id] = [] # Жаңадан бастағанда тарихты тазалау
-    bot.reply_to(message, "Сәлем! Мен Aqyl-AI. Енді мен уақытты да, сіздің сөздеріңізді де ұмытпаймын. Не туралы сөйлесеміз?")
+    user_history[user_id].append({"role": "user", "content": prompt})
 
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    answer = get_ai_response(message.chat.id, message.text)
-    bot.reply_to(message, answer)
+    if len(user_history[user_id]) > 10:
+        user_history[user_id] = [user_history[user_id][0]] + user_history[user_id][-9:]
 
-if __name__ == "__main__":
-    print("Бот 'Есте сақтау' режимінде іске қосылды...")
-    bot.polling(none_stop=True, timeout=90)
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=user_history[user_id]
+        )
+        return completion.choices[0].message.content
+    except:
+        return "Кешіріңіз, байланыс үзілді. Қайта жазып көріңізші."
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_text = update.message.text
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    reply_text = get_ai_response(user_id, user_text)
+    await update.message.reply_text(reply_text)
+
+if __name__ == '__main__':
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    print("РОБОТ ҚОСЫЛДЫ! Енді ол бәріне келісіммен жауап береді.")
+    app.run_polling(drop_pending_updates=True)
